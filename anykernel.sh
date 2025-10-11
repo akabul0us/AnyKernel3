@@ -4,68 +4,120 @@
 ### AnyKernel setup
 # global properties
 properties() { '
-kernel.string="--- Flashing Nethunter Kernel ---"
+kernel.string=Nethunter
 do.devicecheck=1
 do.modules=0
 do.systemless=1
 do.cleanup=1
-do.cleanuponabort=1
-device.name1=surya
-device.name2=karna
-supported.versions=13-15
+do.cleanuponabort=0
+device.name1=laurel_sprout
+supported.versions=10.0-16.0
+supported.patchlevels=
+supported.vendorpatchlevels=
 '; } # end properties
 
 
 ### AnyKernel install
 ## boot files attributes
 boot_attributes() {
-set_perm_recursive 0 0 755 644 $ramdisk/*;
-set_perm_recursive 0 0 750 750 $ramdisk/init* $ramdisk/sbin;
+set_perm_recursive 0 0 755 644 $RAMDISK/*;
+set_perm_recursive 0 0 750 750 $RAMDISK/init* $RAMDISK/sbin;
 } # end attributes
 
 # boot shell variables
-block=/dev/block/bootdevice/by-name/boot;
-is_slot_device=0;
-ramdisk_compression=auto;
-patch_vbmeta_flag=auto;
+BLOCK=/dev/block/by-name/boot;
+IS_SLOT_DEVICE=1;
+RAMDISK_COMPRESSION=auto;
+PATCH_VBMETA_FLAG=auto;
 
 # import functions/variables and setup patching - see for reference (DO NOT REMOVE)
 . tools/ak3-core.sh;
 
 # boot install
-dump_boot; # use split_boot to skip ramdisk unpack, e.g. for devices with init_boot ramdisk
+split_boot; # use split_boot to skip ramdisk unpack, e.g. for devices with init_boot ramdisk
 
-# init.rc
-backup_file init.rc;
-replace_string init.rc "cpuctl cpu,timer_slack" "mount cgroup none /dev/cpuctl cpu" "mount cgroup none /dev/cpuctl cpu,timer_slack";
+# Check if vendor isn't already mounted. This should make the detection work on flasher apps.
+do_patch=1;
+if [ ! -e /vendor/etc/fstab.qcom ]; then
+	if [ -e /dev/block/by-name/vendor ]; then
+		mount /dev/block/by-name/vendor /vendor
+		if [ $? -ne 0 ]; then
+			do_patch=0
+		fi
+	else
+		# If the block device for vendor isn't present at that location, it might mean this a dynamic partitions ROM.
+		mount /vendor
+		if [ $? -ne 0 ]; then
+			do_patch=0
+		fi
+	fi
+fi
 
-# init.tuna.rc
-backup_file init.tuna.rc;
-insert_line init.tuna.rc "nodiratime barrier=0" after "mount_all /fstab.tuna" "\tmount ext4 /dev/block/platform/omap/omap_hsmmc.0/by-name/userdata /data remount nosuid nodev noatime nodiratime barrier=0";
-append_file init.tuna.rc "bootscript" init.tuna;
+# Check for the presence of "first_stage_mount" in /vendor/etc/fstab only for /system or /vendor
+if [ $do_patch -eq 1 ]; then
+	if grep "first_stage_mount" /vendor/etc/fstab.qcom | grep -E -q '(/system|/vendor)'; then
+		ui_print "Two-stage init ROM detected, patching cmdline..."
+		patch_cmdline "tsinit" "tsinit"
+	else
+		ui_print "Legacy init ROM detected, no need to patch"
+	fi
+else
+	ui_print "Skipping cmdline patch because vendor could not be mounted!"
+fi
 
-# fstab.tuna
-backup_file fstab.tuna;
-patch_fstab fstab.tuna /system ext4 options "noatime,barrier=1" "noatime,nodiratime,barrier=0";
-patch_fstab fstab.tuna /cache ext4 options "barrier=1" "barrier=0,nomblk_io_submit";
-patch_fstab fstab.tuna /data ext4 options "data=ordered" "nomblk_io_submit,data=writeback";
-append_file fstab.tuna "usbdisk" fstab;
+## NOT USED for laurel
+# Enable bpf spoofing
+# patch_uname_bpf_spoof() {
+# 	patch_cmdline "uname_bpf_spoof" "uname_bpf_spoof=1"
+# }
 
-write_boot; # use flash_boot to skip ramdisk repack, e.g. for devices with init_boot ramdisk
+# # if device is running HyperMINT ROM
+# if [ -f /vendor/build.prop ]; then
+# 	if grep -q -E 'MINT|mintdevice' /vendor/build.prop; then
+# 		ui_print "HyperMINT ROM detected, enabling bpf spoof..."
+# 		patch_uname_bpf_spoof
+# 	fi
+# fi
+
+# Check for IR HAL type
+if [ -f /vendor/bin/hw/android.hardware.ir-service.lineage ]; then
+	ui_print "LIRC-based IR HAL detected"
+else
+	ui_print "Legacy spidev IR HAL detected"
+	patch_cmdline "legacy_ir_hal" "legacy_ir_hal=1"
+fi
+
+# Get Android version from build.prop
+android_ver=$(file_getprop /system/build.prop ro.build.version.release)
+# Convert to integer (strip potential decimal points)
+android_ver=${android_ver%%.*}
+
+# Check if Android version is 11 or lower
+if [ "$android_ver" -le 11 ] 2>/dev/null; then
+    patch_cmdline "no_kernel_dimming" "no_kernel_dimming=1"
+    ui_print "Disabling kernel dimming support due to Android version (experimental)"
+fi
+
+# Always enable legacy timestamp workaround for laurel
+patch_cmdline "legacy_timestamp_source" "legacy_timestamp_source=1"
+ui_print "Legacy timestamp workaround enabled"
+
+flash_boot; # use flash_boot to skip ramdisk repack, e.g. for devices with init_boot ramdisk
+flash_dtbo;
 ## end boot install
 
 
 ## init_boot files attributes
 #init_boot_attributes() {
-#set_perm_recursive 0 0 755 644 $ramdisk/*;
-#set_perm_recursive 0 0 750 750 $ramdisk/init* $ramdisk/sbin;
+#set_perm_recursive 0 0 755 644 $RAMDISK/*;
+#set_perm_recursive 0 0 750 750 $RAMDISK/init* $RAMDISK/sbin;
 #} # end attributes
 
 # init_boot shell variables
-#block=init_boot;
-#is_slot_device=1;
-#ramdisk_compression=auto;
-#patch_vbmeta_flag=auto;
+#BLOCK=init_boot;
+#IS_SLOT_DEVICE=1;
+#RAMDISK_COMPRESSION=auto;
+#PATCH_VBMETA_FLAG=auto;
 
 # reset for init_boot patching
 #reset_ak;
@@ -78,10 +130,10 @@ write_boot; # use flash_boot to skip ramdisk repack, e.g. for devices with init_
 
 
 ## vendor_kernel_boot shell variables
-#block=vendor_kernel_boot;
-#is_slot_device=1;
-#ramdisk_compression=auto;
-#patch_vbmeta_flag=auto;
+#BLOCK=vendor_kernel_boot;
+#IS_SLOT_DEVICE=1;
+#RAMDISK_COMPRESSION=auto;
+#PATCH_VBMETA_FLAG=auto;
 
 # reset for vendor_kernel_boot patching
 #reset_ak;
@@ -95,15 +147,15 @@ write_boot; # use flash_boot to skip ramdisk repack, e.g. for devices with init_
 
 ## vendor_boot files attributes
 #vendor_boot_attributes() {
-#set_perm_recursive 0 0 755 644 $ramdisk/*;
-#set_perm_recursive 0 0 750 750 $ramdisk/init* $ramdisk/sbin;
+#set_perm_recursive 0 0 755 644 $RAMDISK/*;
+#set_perm_recursive 0 0 750 750 $RAMDISK/init* $RAMDISK/sbin;
 #} # end attributes
 
 # vendor_boot shell variables
-#block=vendor_boot;
-#is_slot_device=1;
-#ramdisk_compression=auto;
-#patch_vbmeta_flag=auto;
+#BLOCK=vendor_boot;
+#IS_SLOT_DEVICE=1;
+#RAMDISK_COMPRESSION=auto;
+#PATCH_VBMETA_FLAG=auto;
 
 # reset for vendor_boot patching
 #reset_ak;
